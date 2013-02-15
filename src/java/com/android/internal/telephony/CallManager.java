@@ -78,6 +78,7 @@ public final class CallManager {
     private static final int EVENT_SUPP_SERVICE_FAILED = 117;
     private static final int EVENT_SERVICE_STATE_CHANGED = 118;
     private static final int EVENT_POST_DIAL_CHARACTER = 119;
+    private static final int EVENT_SUPP_SERVICE_NOTIFY = 120;
 
     // Singleton instance
     private static final CallManager INSTANCE = new CallManager();
@@ -99,6 +100,8 @@ public final class CallManager {
 
     // default phone as the first phone registered, which is PhoneBase obj
     private Phone mDefaultPhone;
+
+    private boolean mSpeedUpAudioForMtCall = false;
 
     // state registrants
     protected final RegistrantList mPreciseCallStateRegistrants
@@ -156,6 +159,9 @@ public final class CallManager {
     = new RegistrantList();
 
     protected final RegistrantList mSuppServiceFailedRegistrants
+    = new RegistrantList();
+
+    protected final RegistrantList mSuppServiceNotificationRegistrants
     = new RegistrantList();
 
     protected final RegistrantList mServiceStateChangedRegistrants
@@ -377,14 +383,21 @@ public final class CallManager {
         // but only on audio mode transitions
         switch (getState()) {
             case RINGING:
-                if (audioManager.getMode() != AudioManager.MODE_RINGTONE) {
+                int curAudioMode = audioManager.getMode();
+                if (curAudioMode != AudioManager.MODE_RINGTONE) {
                     // only request audio focus if the ringtone is going to be heard
                     if (audioManager.getStreamVolume(AudioManager.STREAM_RING) > 0) {
                         if (VDBG) Log.d(LOG_TAG, "requestAudioFocus on STREAM_RING");
                         audioManager.requestAudioFocusForCall(AudioManager.STREAM_RING,
                                 AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
                     }
-                    audioManager.setMode(AudioManager.MODE_RINGTONE);
+                    if(!mSpeedUpAudioForMtCall) {
+                        audioManager.setMode(AudioManager.MODE_RINGTONE);
+                    }
+                }
+
+                if (mSpeedUpAudioForMtCall && (curAudioMode != AudioManager.MODE_IN_CALL)) {
+                    audioManager.setMode(AudioManager.MODE_IN_CALL);
                 }
                 break;
             case OFFHOOK:
@@ -400,13 +413,14 @@ public final class CallManager {
                     // enable IN_COMMUNICATION audio mode instead for sipPhone
                     newAudioMode = AudioManager.MODE_IN_COMMUNICATION;
                 }
-                if (audioManager.getMode() != newAudioMode) {
+                if (audioManager.getMode() != newAudioMode || mSpeedUpAudioForMtCall) {
                     // request audio focus before setting the new mode
                     if (VDBG) Log.d(LOG_TAG, "requestAudioFocus on STREAM_VOICE_CALL");
                     audioManager.requestAudioFocusForCall(AudioManager.STREAM_VOICE_CALL,
                             AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
                     audioManager.setMode(newAudioMode);
                 }
+                mSpeedUpAudioForMtCall = false;
                 break;
             case IDLE:
                 if (audioManager.getMode() != AudioManager.MODE_NORMAL) {
@@ -415,6 +429,7 @@ public final class CallManager {
                     // abandon audio focus after the mode has been set back to normal
                     audioManager.abandonAudioFocusForCall();
                 }
+                mSpeedUpAudioForMtCall = false;
                 break;
         }
     }
@@ -448,6 +463,11 @@ public final class CallManager {
             phone.setOnPostDialCharacter(mHandler, EVENT_POST_DIAL_CHARACTER, null);
         }
 
+        // for events supported only by GSM phone
+        if (phone.getPhoneType() == PhoneConstants.PHONE_TYPE_GSM) {
+            phone.registerForSuppServiceNotification(mHandler, EVENT_SUPP_SERVICE_NOTIFY, null);
+        }
+
         // for events supported only by CDMA phone
         if (phone.getPhoneType() == PhoneConstants.PHONE_TYPE_CDMA ){
             phone.registerForCdmaOtaStatusChange(mHandler, EVENT_CDMA_OTA_STATUS_CHANGE, null);
@@ -479,6 +499,11 @@ public final class CallManager {
         if (phone.getPhoneType() == PhoneConstants.PHONE_TYPE_GSM ||
                 phone.getPhoneType() == PhoneConstants.PHONE_TYPE_CDMA) {
             phone.setOnPostDialCharacter(null, EVENT_POST_DIAL_CHARACTER, null);
+        }
+
+        // for events supported only by GSM phone
+        if (phone.getPhoneType() == PhoneConstants.PHONE_TYPE_GSM) {
+            phone.unregisterForSuppServiceNotification(mHandler);
         }
 
         // for events supported only by CDMA phone
@@ -526,6 +551,23 @@ public final class CallManager {
                 activePhone.switchHoldingAndActive();
             } else if (!sameChannel && hasBgCall) {
                 getActiveFgCall().hangup();
+            }
+        }
+
+        Context context = getContext();
+        if (context == null) {
+            Log.d(LOG_TAG, "Speedup Audio Path enhancement: Context is null");
+        } else if (context.getResources().getBoolean(
+                com.android.internal.R.bool.config_speed_up_audio_on_mt_calls)) {
+            Log.d(LOG_TAG, "Speedup Audio Path enhancement");
+            AudioManager audioManager = (AudioManager)
+                    context.getSystemService(Context.AUDIO_SERVICE);
+            int currMode = audioManager.getMode();
+            if ((currMode != AudioManager.MODE_IN_CALL) && !(ringingPhone instanceof SipPhone)) {
+                Log.d(LOG_TAG, "setAudioMode Setting audio mode from " +
+                                currMode + " to " + AudioManager.MODE_IN_CALL);
+                audioManager.setMode(AudioManager.MODE_IN_CALL);
+                mSpeedUpAudioForMtCall = true;
             }
         }
 
@@ -1290,6 +1332,27 @@ public final class CallManager {
     }
 
     /**
+     * Register for supplementary service notifications.
+     * Message.obj will contain an AsyncResult.
+     *
+     * @param h Handler that receives the notification message.
+     * @param what User-defined message code.
+     * @param obj User object.
+     */
+    public void registerForSuppServiceNotification(Handler h, int what, Object obj){
+        mSuppServiceNotificationRegistrants.addUnique(h, what, obj);
+    }
+
+    /**
+     * Unregister for supplementary service notifications.
+     *
+     * @param h Handler to be removed from the registrant list.
+     */
+    public void unregisterForSuppServiceNotification(Handler h){
+        mSuppServiceNotificationRegistrants.remove(h);
+    }
+
+    /**
      * Register for notifications when a sInCall VoicePrivacy is enabled
      *
      * @param h Handler that receives the notification message.
@@ -1797,6 +1860,10 @@ public final class CallManager {
                 case EVENT_SUPP_SERVICE_FAILED:
                     if (VDBG) Log.d(LOG_TAG, " handleMessage (EVENT_SUPP_SERVICE_FAILED)");
                     mSuppServiceFailedRegistrants.notifyRegistrants((AsyncResult) msg.obj);
+                    break;
+                case EVENT_SUPP_SERVICE_NOTIFY:
+                    if (VDBG) Log.d(LOG_TAG, " handleMessage (EVENT_SUPP_SERVICE_NOTIFICATION)");
+                    mSuppServiceNotificationRegistrants.notifyRegistrants((AsyncResult) msg.obj);
                     break;
                 case EVENT_SERVICE_STATE_CHANGED:
                     if (VDBG) Log.d(LOG_TAG, " handleMessage (EVENT_SERVICE_STATE_CHANGED)");
