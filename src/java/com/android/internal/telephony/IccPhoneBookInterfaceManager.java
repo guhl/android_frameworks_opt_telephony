@@ -16,15 +16,18 @@
 
 package com.android.internal.telephony;
 
+import android.content.Context;
 import android.content.pm.PackageManager;
 import android.os.AsyncResult;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.os.ServiceManager;
+import android.util.Log;
 
 import com.android.internal.telephony.IccCardApplicationStatus.AppType;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -34,6 +37,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public abstract class IccPhoneBookInterfaceManager extends IIccPhoneBook.Stub {
     protected static final boolean DBG = true;
+    static final boolean PFF_D = true;
+    static final String PFF_LOG_TAG = "PHONEBOOK_IF_MAN";
 
     protected PhoneBase phone;
     protected AdnRecordCache adnCache;
@@ -249,9 +254,13 @@ public abstract class IccPhoneBookInterfaceManager extends IIccPhoneBook.Stub {
      */
     public List<AdnRecord> getAdnRecordsInEf(int efid) {
 
-        if (phone.getContext().checkCallingOrSelfPermission(
-                android.Manifest.permission.READ_CONTACTS)
-                != PackageManager.PERMISSION_GRANTED) {
+    	Context mContext = phone.getContext();
+        int res = mContext.pffEnforceCallingOrSelfPermission(
+        		android.Manifest.permission.READ_CONTACTS, "Requires READ_PHONE_STATE");
+        if (res==PackageManager.PERMISSION_SPOOFED) {
+        	if (PFF_D) {Log.d(PFF_LOG_TAG, "IccPhoneBookInterfaceManager.getAdnRecordsInEf: spoofed");}
+        	return new ArrayList<AdnRecord>();
+        } else if (res != PackageManager.PERMISSION_GRANTED) {
             throw new SecurityException(
                     "Requires android.permission.READ_CONTACTS permission");
         }
